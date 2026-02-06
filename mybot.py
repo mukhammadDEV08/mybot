@@ -9,7 +9,7 @@ from pymongo import MongoClient
 
 BOT_TOKEN = "8235597653:AAEUyz9H41e7eFMZPerJMgCD3xMkJN7QV3M"
 MONGO_URI = "mongodb+srv://maminchik08_db_user:I77h7npfkZtRU3vE@cluster0.ezbjmar.mongodb.net/?appName=Cluster0"
-OWNER_ID = 5780006009
+OWNER_ID = 5780006009   # ← BU YERNI O‘ZINGIZNING HAQIQIY TELEGRAM ID BILAN ALMASHTIRING!!!
 
 client = MongoClient(MONGO_URI)
 db = client['kino_bot_db']
@@ -30,9 +30,11 @@ ADD_ID, ADD_NAME, ADD_LINK, ADD_PHOTO, ADD_DESC = range(5)
 # ────────────────────────────────────────────────
 
 async def is_admin(user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return True
     admin_data = settings_col.find_one({"type": "admins"})
     admin_list = admin_data.get('list', []) if admin_data else []
-    return user_id == OWNER_ID or user_id in admin_list
+    return user_id in admin_list
 
 async def check_sub(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if await is_admin(user_id):
@@ -71,13 +73,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Oddiy foydalanuvchi menyusi
     kb = [["🎬 Barcha kinolar", "🔍 Qidirish"], ["📊 Statistika"]]
     
-    # Admin/owner uchun kengaytirilgan menyu
-    if await is_admin(user_id):
+    # Owner uchun to‘liq menyu
+    if user_id == OWNER_ID:
         kb = [
             ["➕ Kino qo'shish", "🎬 Barcha kinolar"],
             ["🗑 Kinolarni o‘chirish", "🔍 Qidirish"],
             ["📊 Statistika", "📢 Kanallarni sozlash"],
             ["👥 Adminlar"]
+        ]
+    # Oddiy admin uchun cheklangan menyu (adminlar bo‘limisiz)
+    elif await is_admin(user_id):
+        kb = [
+            ["➕ Kino qo'shish", "🎬 Barcha kinolar"],
+            ["🗑 Kinolarni o‘chirish", "🔍 Qidirish"],
+            ["📊 Statistika"]
         ]
 
     await update.message.reply_text(
@@ -120,10 +129,43 @@ async def admin_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"fastdel_{m['movie_id']}"
         ))
 
-    # 2 tadan qatorga joylashtirish
     reply_markup = InlineKeyboardMarkup([keyboard[j:j+2] for j in range(0, len(keyboard), 2)])
 
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+# ────────────────────────────────────────────────
+#            OWNER UCHUN ─ ADMINLAR BOSHQARUVI
+# ────────────────────────────────────────────────
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        return await update.message.reply_text("Bu bo‘lim faqat bot egasi uchun!")
+
+    admin_data = settings_col.find_one({"type": "admins"})
+    admins = admin_data.get('list', []) if admin_data else []
+    
+    text = "👥 **Adminlar boshqaruvi** (faqat owner uchun)\n\n"
+    if admins:
+        text += "Hozirgi adminlar:\n"
+        for i, aid in enumerate(admins, 1):
+            try:
+                user = await context.bot.get_chat(aid)
+                name = user.full_name or f"ID: {aid}"
+                text += f"{i}. {name}  (ID: `{aid}`)\n"
+            except:
+                text += f"{i}. ID: `{aid}` (foydalanuvchi topilmadi)\n"
+    else:
+        text += "Hozircha qo‘shimcha admin yo‘q.\n"
+    
+    text += "\nQuyidagilardan birini tanlang:"
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Yangi admin qo‘shish", callback_data="add_admin")],
+        [InlineKeyboardButton("➖ Adminni olib tashlash", callback_data="remove_admin")],
+    ]
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 # ────────────────────────────────────────────────
 #                  CALLBACK HANDLER
@@ -141,16 +183,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.answer("Hali barcha kanallarga obuna bo‘lmagansiz!", show_alert=True)
 
-    elif data.startswith("view_"):
-        movie_id = data.split("_")[1]
-        movie = movies_col.find_one({"movie_id": movie_id})
-        if movie:
-            cap = f"<b>🎬 {movie['name']}</b>\n\n{movie.get('desc', '')}\n\n🔢 Kodi: <code>{movie['movie_id']}</code>"
-            if len(movie['link']) > 40 and not movie['link'].startswith("http"):
-                await query.message.reply_video(video=movie['link'], caption=cap, parse_mode="HTML")
-            else:
-                await query.message.reply_text(f"{cap}\n\n🔗 Link: {movie['link']}", parse_mode="HTML")
-
     elif data.startswith("fastdel_"):
         if not await is_admin(query.from_user.id):
             return await query.answer("Bu amalni faqat admin bajarishi mumkin!", show_alert=True)
@@ -162,6 +194,17 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text(f"✅ {movie_id} kodli kino o‘chirildi.")
         else:
             await query.answer("Bunday kino topilmadi.", show_alert=True)
+
+    elif data in ("add_admin", "remove_admin"):
+        if query.from_user.id != OWNER_ID:
+            await query.answer("Bu amalni faqat bot egasi bajarishi mumkin!", show_alert=True)
+            return
+        
+        action = "qo‘shish" if data == "add_admin" else "olib tashlash"
+        await query.message.edit_text(
+            f"Admin {action} uchun foydalanuvchi **ID** sini yuboring:"
+        )
+        context.user_data['admin_action'] = 'add' if data == "add_admin" else 'remove'
 
 # ────────────────────────────────────────────────
 #                  XABARLARNI QAYTA ISHLASH
@@ -182,7 +225,58 @@ async def msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("Bu funksiya faqat admin uchun!")
         return await admin_delete_list(update, context)
 
-    # Qidiruv (ID yoki nom bo‘yicha)
+    elif text == "👥 Adminlar":
+        if user_id != OWNER_ID:
+            return await update.message.reply_text("Bu bo‘lim faqat bot egasi uchun mavjud!")
+        return await admin_panel(update, context)
+
+    # Admin qo‘shish / olib tashlash (owner yuborgan ID)
+    elif 'admin_action' in context.user_data:
+        if user_id != OWNER_ID:
+            return await update.message.reply_text("Bu amalni faqat bot egasi bajarishi mumkin!")
+        
+        action = context.user_data['admin_action']
+        try:
+            target_id = int(text)
+        except ValueError:
+            return await update.message.reply_text("ID faqat raqamlardan iborat bo‘lishi kerak!")
+
+        admin_doc = settings_col.find_one({"type": "admins"}) or {"type": "admins", "list": []}
+        admins = admin_doc["list"]
+
+        changed = False
+
+        if action == 'add':
+            if target_id == OWNER_ID:
+                await update.message.reply_text("Owner allaqachon admin!")
+            elif target_id in admins:
+                await update.message.reply_text("Bu ID allaqachon admin!")
+            else:
+                admins.append(target_id)
+                changed = True
+                await update.message.reply_text(f"✅ {target_id} admin qilib tayinlandi!")
+
+        elif action == 'remove':
+            if target_id == OWNER_ID:
+                await update.message.reply_text("Ownerni olib tashlab bo‘lmaydi!")
+            elif target_id not in admins:
+                await update.message.reply_text("Bunday admin topilmadi.")
+            else:
+                admins.remove(target_id)
+                changed = True
+                await update.message.reply_text(f"✅ {target_id} adminlikdan olib tashlandi!")
+
+        if changed:
+            settings_col.update_one(
+                {"type": "admins"},
+                {"$set": {"list": admins}},
+                upsert=True
+            )
+
+        del context.user_data['admin_action']
+        return
+
+    # Qidiruv
     movie = movies_col.find_one({
         "$or": [
             {"movie_id": text},
@@ -222,13 +316,13 @@ async def add_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['link'] = update.message.video.file_id
     else:
         context.user_data['link'] = update.message.text.strip()
-    await update.message.reply_text("Rasm **file_id** si yoki rasm yuboring (ixtiyoriy, o‘tkazib yuborish mumkin):")
+    await update.message.reply_text("Rasm **file_id** si yoki rasm yuboring (ixtiyoriy):")
     return ADD_PHOTO
 
 async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
         context.user_data['img'] = update.message.photo[-1].file_id
-    elif update.message.text:
+    elif update.message.text and update.message.text.strip():
         context.user_data['img'] = update.message.text.strip()
     else:
         context.user_data['img'] = ""
@@ -259,7 +353,6 @@ async def add_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ConversationHandler - kino qo'shish
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^➕ Kino qo\'shish$'), add_start)],
         states={
