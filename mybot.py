@@ -8,14 +8,14 @@ BOT_TOKEN = "8235597653:AAEUyz9H41e7eFMZPerJMgCD3xMkJN7QV3M"
 MONGO_URI = "mongodb+srv://maminchik08_db_user:I77h7npfkZtRU3vE@cluster0.ezbjmar.mongodb.net/?appName=Cluster0"
 OWNER_ID = 5780006009 
 
-client = MongoClient(MONGO_URI, connectTimeoutMS=5000)
+client = MongoClient(MONGO_URI)
 db = client['kino_bot_db']
 movies_col, users_col, settings_col = db['movies'], db['users'], db['settings']
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 ADD_ID, ADD_NAME, ADD_LINK, ADD_PHOTO, ADD_DESC = range(5)
 
-# --- FUNKSIYALAR ---
+# --- YORDAMCHI FUNKSIYALAR ---
 async def get_admin_ids():
     data = settings_col.find_one({"type": "admins"})
     return data['list'] if data else []
@@ -41,114 +41,88 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not await check_sub(user_id, context):
         channels = await get_channels()
-        buttons = [[InlineKeyboardButton(f"{i+1}-kanal", url=ch if "http" in ch else f"https://t.me/{ch[1:]}")] for i, ch in enumerate(channels)]
-        buttons.append([InlineKeyboardButton("✅ Tekshirish", callback_data="recheck")])
-        return await update.message.reply_text("Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling!", reply_markup=InlineKeyboardMarkup(buttons))
+        btns = [[InlineKeyboardButton(f"{i+1}-kanal", url=ch if "http" in ch else f"https://t.me/{ch[1:]}")] for i, ch in enumerate(channels)]
+        btns.append([InlineKeyboardButton("✅ Tekshirish", callback_data="recheck")])
+        return await update.message.reply_text("Obuna bo'ling:", reply_markup=InlineKeyboardMarkup(btns))
 
     kb = [["🎬 Barcha kinolar", "🔍 Qidirish"], ["📊 Statistika"]]
     if user_id == OWNER_ID or user_id in await get_admin_ids():
         kb = [["➕ Kino qo'shish", "🎬 Barcha kinolar"], ["🔍 Qidirish", "📊 Statistika"], ["📢 Kanallarni sozlash", "👥 Adminlar"]]
-    
-    await update.message.reply_text("Kino kodini yuboring yoki menyuni tanlang:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("Tanlang:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-# --- KINO KARTASINI CHIQARISH ---
-async def show_movie_card(update, context, res):
+# --- KINO CHIQARISH (ASOSIY) ---
+async def show_movie(update, context, res):
     user_id = update.effective_user.id
-    admin_ids = await get_admin_ids()
-    is_admin = (user_id == OWNER_ID or user_id in admin_ids)
-    
+    is_admin = user_id == OWNER_ID or user_id in await get_admin_ids()
     cap = f"<b>🎬 {res['name']}</b>\n\n{res.get('desc', '')}\n\n🔢 Kodi: <code>{res['movie_id']}</code>"
     
-    # Tugmalar (Har doim o'chirish tugmasi bilan)
     btns = []
-    
-    # Agar bu video bo'lsa
-    if len(res['link']) > 40 and not res['link'].startswith("http"):
-        if is_admin: btns.append([InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_{res['movie_id']}")])
-        await update.message.reply_video(video=res['link'], caption=cap, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
-    else:
-        # Agar bu link bo'lsa
+    # Video yoki Link ekanini aniqlash
+    is_video = len(res['link']) > 40 and not res['link'].startswith("http")
+
+    if not is_video:
         btns = [[InlineKeyboardButton(str(i), url=res['link']) for i in range(1, 6)],
                 [InlineKeyboardButton("6", url=res['link']), InlineKeyboardButton("⬅️", callback_data="p"), 
                  InlineKeyboardButton("❌", callback_data="c"), InlineKeyboardButton("➡️", callback_data="n")]]
-        if is_admin: btns.append([InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_{res['movie_id']}")])
-        
-        if "http" in str(res.get('img', '')) or len(str(res.get('img', ''))) > 20:
-            await update.message.reply_photo(photo=res['img'], caption=cap, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
-        else:
-            await update.message.reply_text(text=cap, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
 
-# --- XABARLAR HANDLER ---
+    if is_admin:
+        btns.append([InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_{res['movie_id']}")])
+
+    markup = InlineKeyboardMarkup(btns) if btns else None
+    
+    # Qayerdan kelayotganiga qarab yuborish (callback yoki message)
+    target = update.message if update.message else update.callback_query.message
+
+    if is_video:
+        await target.reply_video(video=res['link'], caption=cap, parse_mode="HTML", reply_markup=markup)
+    else:
+        if "http" in str(res.get('img', '')) or len(str(res.get('img', ''))) > 20:
+            await target.reply_photo(photo=res['img'], caption=cap, parse_mode="HTML", reply_markup=markup)
+        else:
+            await target.reply_text(text=cap, parse_mode="HTML", reply_markup=markup)
+
+# --- XABARLAR ---
 async def msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, text = update.effective_user.id, update.message.text
     if not await check_sub(user_id, context): return
 
     if text == "🎬 Barcha kinolar":
-        movies = list(movies_col.find().sort("movie_id", 1)) # ID bo'yicha tartiblash
-        if not movies: return await update.message.reply_text("Bazada kinolar yo'q.")
-        
-        txt = "🎬 **Kinolar ro'yxati:**\n\n"
-        btns = []
-        for i, m in enumerate(movies, 1):
-            # Ro'yxatda: 1. Nomi (ID: 10) formatida
-            btns.append([InlineKeyboardButton(f"{i}. {m['name']} (ID: {m['movie_id']})", callback_data=f"shw_{m['movie_id']}")])
-        
-        return await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="Markdown")
+        movies = list(movies_col.find().sort("movie_id", 1))
+        if not movies: return await update.message.reply_text("Kinolar yo'q.")
+        btns = [[InlineKeyboardButton(f"{i+1}. {m['name']} (ID: {m['movie_id']})", callback_data=f"shw_{m['movie_id']}")] for i, m in enumerate(movies)]
+        return await update.message.reply_text("Katalog:", reply_markup=InlineKeyboardMarkup(btns))
 
-    if text == "🔍 Qidirish":
-        return await update.message.reply_text("Kino nomini yuboring:")
-
-    if text == "📊 Statistika":
-        return await update.message.reply_text(f"Azolar: {users_col.count_documents({})}\nKinolar: {movies_col.count_documents({})}")
+    if text == "🔍 Qidirish": return await update.message.reply_text("Nomini yozing:")
+    if text == "📊 Statistika": return await update.message.reply_text(f"Azolar: {users_col.count_documents({})}\nKinolar: {movies_col.count_documents({})}")
     
-    if text == "👥 Adminlar" and user_id == OWNER_ID:
-        admins = await get_admin_ids()
-        return await update.message.reply_text(f"Adminlar: `{admins}`\n\nQo'shish: `+admin ID`", parse_mode="Markdown")
-
-    # Qidiruv
-    query = {"$or": [{"movie_id": text.strip()}, {"name": {"$regex": text, "$options": "i"}}]}
-    res = movies_col.find_one(query)
-    if res: await show_movie_card(update, context, res)
+    # Qidiruv (Kichik-katta harf farq qilmaydi)
+    res = movies_col.find_one({"$or": [{"movie_id": text.strip()}, {"name": {"$regex": f"^{text}$", "$options": "i"}}, {"name": {"$regex": text, "$options": "i"}}]})
+    if res: await show_movie(update, context, res)
     elif not text.startswith("/"): await update.message.reply_text("Topilmadi ❌")
 
-# --- CALLBACK HANDLER ---
+# --- CALLBACK ---
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    user_id = q.from_user.id
-    is_admin = (user_id == OWNER_ID or user_id in await get_admin_ids())
-
     if q.data.startswith("shw_"):
+        res = movies_col.find_one({"movie_id": q.data.split("_")[1]})
+        if res: await q.message.delete(); await show_movie(q, context, res)
+    elif q.data.startswith("del_"):
         m_id = q.data.split("_")[1]
-        res = movies_col.find_one({"movie_id": m_id})
-        if res:
-            # callback_query ob'ektini show_movie_card'ga moslash
-            await q.message.delete()
-            # update o'rniga q yuboramiz, lekin u yerda message borligiga ishonch hosil qilamiz
-            await show_movie_card(q, context, res)
-
-    elif q.data.startswith("del_") and is_admin:
-        m_id = q.data.split("_")[1]
-        btn = [[InlineKeyboardButton("✅ Ha, O'chirilsin", callback_data=f"fdel_{m_id}"), 
-                InlineKeyboardButton("❌ Yo'q", callback_data="cancel")]]
-        await q.message.reply_text(f"{m_id} kodli kino o'chirilsinmi?", reply_markup=InlineKeyboardMarkup(btn))
-
-    elif q.data.startswith("fdel_") and is_admin:
+        btn = [[InlineKeyboardButton("✅ O'chirish", callback_data=f"fdel_{m_id}"), InlineKeyboardButton("❌ Yo'q", callback_data="cancel")]]
+        await q.message.reply_text(f"O'chirilsinmi?", reply_markup=InlineKeyboardMarkup(btn))
+    elif q.data.startswith("fdel_"):
         movies_col.delete_one({"movie_id": q.data.split("_")[1]})
-        await q.message.edit_text("Kino o'chirildi ✅")
-
+        await q.message.edit_text("O'chirildi ✅")
     elif q.data == "recheck":
-        if await check_sub(user_id, context):
-            await q.message.delete()
-            await q.message.reply_text("Tayyor!")
+        if await check_sub(q.from_user.id, context): await q.message.delete(); await q.message.reply_text("Tayyor!")
     elif q.data == "cancel": await q.message.delete()
 
-# --- KINO QO'SHISH ---
+# --- QO'SHISH ---
 async def add_start(u, c): await u.message.reply_text("ID:"); return ADD_ID
 async def add_id(u, c): c.user_data['id'] = u.message.text; await u.message.reply_text("Nomi:"); return ADD_NAME
-async def add_name(u, c): c.user_data['name'] = u.message.text; await u.message.reply_text("Video tashlang yoki Link yuboring:"); return ADD_LINK
+async def add_name(u, c): c.user_data['name'] = u.message.text; await u.message.reply_text("Video/Link:"); return ADD_LINK
 async def add_link(u, c):
-    if u.message.video: c.user_data['link'] = u.message.video.file_id
-    else: c.user_data['link'] = u.message.text
+    c.user_data['link'] = u.message.video.file_id if u.message.video else u.message.text
     await u.message.reply_text("Rasm/Belgi:"); return ADD_PHOTO
 async def add_photo(u, c):
     c.user_data['img'] = u.message.photo[-1].file_id if u.message.photo else u.message.text
